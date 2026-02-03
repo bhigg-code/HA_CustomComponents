@@ -1,0 +1,10 @@
+{
+  "domain": "atlona_matrix",
+  "name": "Atlona Matrix",
+  "version": "0.1.0",
+  "documentation": "https://example.com",
+  "dependencies": [],
+  "codeowners": [],
+  "requirements": [],
+  "config_flow": true
+}
