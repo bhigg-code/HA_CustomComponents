@@ -4,7 +4,7 @@ A collection of custom components for Home Assistant.
 
 ## Components
 
-### Atlona-Matrix
+### [Atlona-Matrix](Atlona-Matrix/)
 Custom integration for Atlona OPUS matrix switchers (AT-OPUS-810M and similar).
 
 Features:
@@ -12,6 +12,12 @@ Features:
 - Source selection via select entities
 - Master power control
 - Per-zone power control
-- Real-time routing status
 
-See [Atlona-Matrix/README.md](Atlona-Matrix/README.md) for installation and usage.
+### [JVC-Projector](JVC-Projector/)
+Custom integration for JVC projectors (NZ series and others) via network control.
+
+Features:
+- Power on/off control
+- Input selection (HDMI 1/2)
+- Picture mode selection
+- Sensors for model, laser hours, firmware

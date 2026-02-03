@@ -1,0 +1,18 @@
+{
+    "config": {
+        "step": {
+            "user": {
+                "title": "JVC Projector",
+                "description": "Enter the IP address and port of your JVC projector. If network password is enabled, enter it below.",
+                "data": {
+                    "host": "IP Address",
+                    "port": "Port",
+                    "password": "Password (if required)"
+                }
+            }
+        },
+        "error": {
+            "cannot_connect": "Cannot connect to projector. Check IP, port, and password."
+        }
+    }
+}

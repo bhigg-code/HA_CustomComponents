@@ -1,0 +1,9 @@
+{
+    "domain": "jvc_projector",
+    "name": "JVC Projector",
+    "codeowners": ["@bhigg-code"],
+    "config_flow": true,
+    "documentation": "https://github.com/bhigg-code/HA_CustomComponents",
+    "iot_class": "local_polling",
+    "version": "1.0.0"
+}
