@@ -1,20 +1,17 @@
 """JVC Projector client for network communication."""
 import asyncio
-import hashlib
 import logging
-import struct
 from typing import Optional
 
 from .const import (
     PJOK, PJREQ, PJACK, HEAD_OP, HEAD_REF, HEAD_RES, HEAD_ACK, END,
     CMD_POWER, CMD_INPUT, CMD_PICTURE_MODE, CMD_MODEL, CMD_LASER_TIME,
     CMD_SOFTWARE_VERSION, POWER_STATES, INPUT_SOURCES, PICTURE_MODES,
-    POWER_ON, POWER_OFF, INPUT_CODES, PICTURE_MODE_CODES, DEFAULT_TIMEOUT
+    POWER_ON, POWER_OFF, INPUT_CODES, PICTURE_MODE_CODES, DEFAULT_TIMEOUT,
+    MODEL_MAP
 )
 
 _LOGGER = logging.getLogger(__name__)
-
-AUTH_SALT = "JVCKWPJ"
 
 
 class JvcProjectorClient:
@@ -52,11 +49,11 @@ class JvcProjectorClient:
                 await self.disconnect()
                 return False
             
-            # Send handshake request
+            # Send handshake request - format is PJREQ_ + password (underscore separator)
             if self._password:
-                # Send with password padding
-                auth_data = struct.pack(f"{max(16, len(self._password))}s", self._password.encode())
-                self._writer.write(PJREQ + auth_data)
+                # Password can be plain text or pre-hashed SHA-256
+                self._writer.write(b"PJREQ_" + self._password.encode())
+                _LOGGER.debug("Sending PJREQ_ with password")
             else:
                 self._writer.write(PJREQ)
             await self._writer.drain()
@@ -71,24 +68,6 @@ class JvcProjectorClient:
                 _LOGGER.debug("Connected to JVC projector at %s", self._host)
                 return True
             elif response.startswith(b"PJNAK"):
-                # Check if there's an auth challenge
-                if len(response) > 5:
-                    challenge = response[5:]
-                    _LOGGER.debug(f"Auth challenge received: {challenge}")
-                    # Try with password hash
-                    if self._password:
-                        auth_hash = hashlib.sha256(f"{self._password}{AUTH_SALT}".encode()).hexdigest().encode()
-                        self._writer.write(auth_hash)
-                        await self._writer.drain()
-                        
-                        response = await asyncio.wait_for(
-                            self._reader.read(10),
-                            timeout=self._timeout
-                        )
-                        if response.startswith(PJACK):
-                            _LOGGER.debug("Authenticated successfully")
-                            return True
-                
                 _LOGGER.error("Authentication failed - check password")
                 await self.disconnect()
                 return False
@@ -127,30 +106,53 @@ class JvcProjectorClient:
                 self._writer.write(message)
                 await self._writer.drain()
                 
-                # Read acknowledgment
-                ack = await asyncio.wait_for(
+                # Read response - may contain ACK + response together or separately
+                response = await asyncio.wait_for(
                     self._reader.read(100),
                     timeout=self._timeout
                 )
-                _LOGGER.debug(f"Received: {ack.hex()}")
+                _LOGGER.debug(f"Received: {response.hex()}")
                 
-                # Parse response
-                if HEAD_ACK in ack:
-                    # For operation commands, just ack
-                    return b"OK"
-                elif HEAD_RES in ack:
+                # Check if response contains the actual data (HEAD_RES)
+                if HEAD_RES in response:
                     # Extract response data
-                    idx = ack.find(HEAD_RES)
-                    if idx >= 0:
-                        # Response format: HEAD_RES + cmd + data + END
-                        data = ack[idx + len(HEAD_RES):]
-                        # Remove command code and END
-                        if END in data:
-                            data = data[:data.find(END)]
-                        if len(data) > len(cmd):
-                            return data[len(cmd):]
-                        return data
-                return ack
+                    idx = response.find(HEAD_RES)
+                    data = response[idx + len(HEAD_RES):]
+                    if END in data:
+                        data = data[:data.find(END)]
+                    # Response prefix is always 2 bytes (e.g., PW, IP, MD, IF, PM)
+                    # regardless of command length (IFSV -> IF, PMPM -> PM)
+                    if len(data) > 2:
+                        return data[2:]
+                    return data
+                
+                # If we only got ACK, check if this is a query (reference) command
+                if HEAD_ACK in response and header == HEAD_REF:
+                    # For queries, try to read the actual response
+                    try:
+                        response2 = await asyncio.wait_for(
+                            self._reader.read(100),
+                            timeout=self._timeout
+                        )
+                        _LOGGER.debug(f"Received (2nd read): {response2.hex()}")
+                        if HEAD_RES in response2:
+                            idx = response2.find(HEAD_RES)
+                            data = response2[idx + len(HEAD_RES):]
+                            if END in data:
+                                data = data[:data.find(END)]
+                            # Response prefix is always 2 bytes
+                            if len(data) > 2:
+                                return data[2:]
+                            return data
+                    except asyncio.TimeoutError:
+                        _LOGGER.debug("No second response received")
+                        return None
+                
+                # For operation commands, ACK means success
+                if HEAD_ACK in response:
+                    return b"OK"
+                
+                return response
                 
             except (asyncio.TimeoutError, OSError) as e:
                 _LOGGER.error(f"Command failed: {e}")
@@ -206,7 +208,19 @@ class JvcProjectorClient:
         """Get projector model."""
         response = await self._send_command(HEAD_REF, CMD_MODEL)
         if response:
-            return response.decode("utf-8", errors="ignore").strip()
+            raw_model = response.decode("utf-8", errors="ignore").strip()
+            _LOGGER.debug(f"Raw model response: {raw_model}")
+            # Extract the model code (part after " -- ", e.g., "ILAFPJ -- B8A1" -> "B8A1")
+            if " -- " in raw_model:
+                model_code = raw_model.split(" -- ")[1].strip()
+            else:
+                model_code = raw_model
+            # Look up friendly name
+            friendly_name = MODEL_MAP.get(model_code)
+            if friendly_name:
+                return friendly_name
+            # Return raw if no mapping found
+            return raw_model
         return None
 
     async def get_laser_hours(self) -> Optional[int]:
@@ -214,8 +228,12 @@ class JvcProjectorClient:
         response = await self._send_command(HEAD_REF, CMD_LASER_TIME)
         if response:
             try:
-                return int(response.decode("utf-8", errors="ignore").strip())
-            except (ValueError, AttributeError):
+                # Response is hex-encoded hours
+                hex_value = response.decode("utf-8", errors="ignore").strip()
+                _LOGGER.debug(f"Raw laser hours response: {hex_value}")
+                return int(hex_value, 16)
+            except (ValueError, AttributeError) as e:
+                _LOGGER.debug(f"Failed to parse laser hours: {e}")
                 pass
         return None
 
@@ -223,7 +241,16 @@ class JvcProjectorClient:
         """Get software version."""
         response = await self._send_command(HEAD_REF, CMD_SOFTWARE_VERSION)
         if response:
-            return response.decode("utf-8", errors="ignore").strip()
+            raw_version = response.decode("utf-8", errors="ignore").strip()
+            _LOGGER.debug(f"Raw firmware version: {raw_version}")
+            # Extract just the numeric portion (e.g., "0200PJ" -> "0200", "0200  " -> "0200")
+            version_digits = ''.join(c for c in raw_version[:4] if c.isdigit())
+            # Format version: "0200" -> "v2.00"
+            if len(version_digits) == 4:
+                major = int(version_digits[0:2])
+                minor = version_digits[2:4]
+                return f"v{major}.{minor}"
+            return raw_version
         return None
 
     async def get_all_status(self) -> dict:

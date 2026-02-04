@@ -3,11 +3,27 @@
         "step": {
             "user": {
                 "title": "JVC Projector",
-                "description": "Enter the IP address and port of your JVC projector. If network password is enabled, enter it below.",
+                "description": "Enter the IP address and port of your JVC projector. If network password is enabled, enter it below (plain text or SHA-256 hash).",
                 "data": {
                     "host": "IP Address",
                     "port": "Port",
-                    "password": "Password (if required)"
+                    "password": "Password or SHA-256 hash (if required)"
+                }
+            }
+        },
+        "error": {
+            "cannot_connect": "Cannot connect to projector. Check IP, port, and password."
+        }
+    },
+    "options": {
+        "step": {
+            "init": {
+                "title": "JVC Projector Settings",
+                "description": "Update connection settings for your JVC projector. Password can be plain text or SHA-256 hash.",
+                "data": {
+                    "host": "IP Address",
+                    "port": "Port",
+                    "password": "Password or SHA-256 hash (if required)"
                 }
             }
         },
