@@ -4,56 +4,115 @@ import time
 
 _LOGGER = logging.getLogger(__name__)
 
+
 class AtlonaClient:
-    def __init__(self, host: str, port: int = 23, timeout: float = 5.0):
+    """Optimized Atlona client that connects via the Telnet Broker service.
+    
+    Optimizations:
+    - Static info (model, hostname, version) fetched separately, cached by coordinator
+    - Single 'Status' command returns both video and audio routing
+    - Output power states polled less frequently
+    """
+    
+    def __init__(self, host: str, port: int = 2323, timeout: float = 5.0):
         self.host = host
         self.port = port
         self._timeout = timeout
 
-    def send_command(self, command):
-        """Send a command - opens new connection each time."""
-        if isinstance(command, str):
-            if not command.endswith("\r\n"):
-                command += "\r\n"
-            command = command.encode()
-            
+    def _send_to_broker(self, command: str) -> str:
+        """Send a command to the broker and get response."""
         s = None
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(5)
+            s.settimeout(self._timeout)
             s.connect((self.host, self.port))
             
-            time.sleep(1)
-            try:
-                s.settimeout(0.5)
-                s.recv(1024)
-            except socket.timeout:
-                pass
+            if not command.endswith("\n"):
+                command += "\n"
+            s.sendall(command.encode())
             
-            s.settimeout(5)
-            s.sendall(command)
-            time.sleep(1)
+            chunks = []
+            s.settimeout(1.0)
+            while True:
+                try:
+                    data = s.recv(4096)
+                    if not data:
+                        break
+                    chunks.append(data)
+                except socket.timeout:
+                    break
             
-            resp = s.recv(4096)
-            decoded = resp.decode("utf-8", errors="ignore").strip()
-            _LOGGER.debug(f"Atlona cmd response: {repr(decoded)}")
+            decoded = b''.join(chunks).decode("utf-8", errors="ignore").strip()
+            
+            if decoded.startswith("ERROR:"):
+                _LOGGER.warning(f"Broker error: {decoded}")
+                return ""
+            
+            _LOGGER.debug(f"Broker response for '{command.strip()}': {repr(decoded)}")
             return decoded
+            
+        except socket.timeout:
+            _LOGGER.warning(f"Broker timeout for command: {command.strip()}")
+            return ""
         except Exception as e:
-            _LOGGER.warning(f"Atlona send_command error: {e}")
+            _LOGGER.warning(f"Broker send error: {e}")
             return ""
         finally:
             if s:
-                try:
-                    s.shutdown(socket.SHUT_RDWR)
-                except:
-                    pass
                 try:
                     s.close()
                 except:
                     pass
 
+    def send_command(self, command: str) -> str:
+        """Send a single command to Atlona via broker."""
+        cmd = command.strip()
+        if cmd.endswith("\r\n"):
+            cmd = cmd[:-2]
+        elif cmd.endswith("\n"):
+            cmd = cmd[:-1]
+        return self._send_to_broker(cmd)
+
+    def get_static_info(self) -> dict:
+        """Get static device info (call once, cache result).
+        
+        Returns model, hostname, version - these don't change during operation.
+        3 commands total.
+        """
+        return {
+            "model": self._send_to_broker("Type"),
+            "hostname": self._send_to_broker("show_host_name"),
+            "version": self._send_to_broker("Version"),
+        }
+
+    def get_routing_status(self) -> dict:
+        """Get current routing and power status.
+        
+        Uses single 'Status' command for both video and audio routing.
+        2 commands total (Status + PWSTA).
+        """
+        return {
+            "status_raw": self._send_to_broker("Status"),  # Returns both V and A
+            "power": self._send_to_broker("PWSTA"),
+        }
+
+    def get_output_power_states(self) -> str:
+        """Get output power states for all outputs.
+        
+        10 commands (one per output). Call less frequently.
+        """
+        output_power_lines = []
+        for i in range(1, 11):
+            resp = self._send_to_broker(f"x{i}$ sta")
+            if resp:
+                output_power_lines.append(resp)
+        return "\n".join(output_power_lines)
+
     def get_all_status(self):
-        """Get all status in a single connection."""
+        """Legacy method for compatibility - fetches everything.
+        
+        Use get_routing_status() + cached static info instead.
+        """
         result = {
             "power": "",
             "hostname": "",
@@ -64,41 +123,24 @@ class AtlonaClient:
             "output_power_raw": "",
         }
         
-        s = None
         try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(15)
-            s.connect((self.host, self.port))
+            result["power"] = self._send_to_broker("PWSTA")
+            result["model"] = self._send_to_broker("Type")
+            result["hostname"] = self._send_to_broker("show_host_name")
+            result["version"] = self._send_to_broker("Version")
             
-            time.sleep(1)
-            try:
-                s.settimeout(1)
-                s.recv(1024)
-            except socket.timeout:
-                pass
-            s.settimeout(5)
+            # Use single Status command
+            status = self._send_to_broker("Status")
+            lines = status.split("\n")
+            if len(lines) >= 2:
+                result["video_raw"] = lines[0]
+                result["audio_raw"] = lines[1]
+            elif len(lines) == 1:
+                result["video_raw"] = lines[0]
             
-            def cmd(c):
-                s.sendall((c + "\r\n").encode())
-                time.sleep(0.5)
-                try:
-                    resp = s.recv(4096).decode("utf-8", errors="ignore").strip()
-                    _LOGGER.debug(f"Atlona {c} -> {repr(resp)}")
-                    return resp
-                except:
-                    return ""
-            
-            result["power"] = cmd("PWSTA")
-            result["model"] = cmd("Type")
-            result["hostname"] = cmd("show_host_name")
-            result["version"] = cmd("Version")
-            result["video_raw"] = cmd("Status V")
-            result["audio_raw"] = cmd("Status A")
-            
-            # Get output power states for outputs 1-10
             output_power_lines = []
             for i in range(1, 11):
-                resp = cmd(f"x{i}$ sta")
+                resp = self._send_to_broker(f"x{i}$ sta")
                 if resp:
                     output_power_lines.append(resp)
             result["output_power_raw"] = "\n".join(output_power_lines)
@@ -108,21 +150,32 @@ class AtlonaClient:
         except Exception as e:
             _LOGGER.error(f"Atlona get_all_status error: {e}")
             return result
-        finally:
-            if s:
-                try:
-                    s.shutdown(socket.SHUT_RDWR)
-                except:
-                    pass
-                try:
-                    s.close()
-                except:
-                    pass
 
     def set_output_power(self, output_id: int, power: bool) -> str:
+        """Set output power state."""
         cmd = "on" if power else "off"
         return self.send_command(f"x{output_id}$ {cmd}")
 
     def set_route(self, output_id: int, input_id: str) -> str:
+        """Set video/audio routing."""
         clean_input = input_id.replace("x", "").replace("V", "")
         return self.send_command(f"x{clean_input}AVx{output_id}")
+    
+    def check_broker_status(self) -> dict:
+        """Check broker connection status."""
+        import json
+        resp = self._send_to_broker("BROKER:STATUS")
+        try:
+            return json.loads(resp)
+        except:
+            return {"connected": False, "error": resp}
+    
+    def wait_for_connection(self, timeout: float = 30.0) -> bool:
+        """Wait for broker to be connected to Atlona."""
+        old_timeout = self._timeout
+        self._timeout = timeout
+        try:
+            resp = self._send_to_broker("BROKER:WAIT")
+            return "OK" in resp
+        finally:
+            self._timeout = old_timeout

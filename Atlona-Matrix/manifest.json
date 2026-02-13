@@ -1,10 +1,12 @@
 {
   "domain": "atlona_matrix",
   "name": "Atlona Matrix",
-  "version": "0.1.0",
-  "documentation": "https://example.com",
+  "version": "0.2.0",
+  "documentation": "https://github.com/bhigg-code/homeassistant-atlona-matrix",
+  "issue_tracker": "https://github.com/bhigg-code/homeassistant-atlona-matrix/issues",
   "dependencies": [],
-  "codeowners": [],
+  "codeowners": ["@bhigg-code"],
   "requirements": [],
-  "config_flow": true
+  "config_flow": true,
+  "iot_class": "local_polling"
 }
